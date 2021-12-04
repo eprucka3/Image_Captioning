@@ -73,10 +73,13 @@ def collate_fn(data):
     #     all_targets.append(targets)
 
     lengths = [len(cap[0]) for cap in captions]
+    #targets = torch.zeros(len(captions), max(lengths)).long()
     targets = torch.zeros(len(captions), max(lengths)).long()
+    targets[0] = 1
     for i, cap in enumerate(captions):
         end = lengths[i]
-        targets[i, :end] = cap[0][:end]
+        # targets[i, :end] = cap[0][:end]
+        # targets[i, :end] = word2idx('a')[:end]
     return images, targets, lengths, img_ids
 
 def get_loader(method, vocab, batch_size):
@@ -103,5 +106,6 @@ def get_loader(method, vocab, batch_size):
                                               batch_size=batch_size,
                                               shuffle=True,
                                               num_workers=1,
-                                              collate_fn=collate_fn)
+                                              collate_fn=collate_fn,
+                                              drop_last=True)
     return data_loader

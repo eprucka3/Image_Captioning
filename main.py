@@ -46,7 +46,7 @@ import json
 # hyperparams
 grad_clip = 5.
 num_epochs = 4
-batch_size = 32
+batch_size = 1
 decoder_lr = 0.0004
 
 # if both are false them model = baseline
@@ -160,105 +160,160 @@ class Decoder(nn.Module):
             for p in self.embedding.parameters():
                 p.requires_grad = True
 
-    def forward(self, encoder_out, encoded_captions, caption_lengths):    
+    def forward(self, encoder_out):    
         batch_size = encoder_out.size(0)
         encoder_dim = encoder_out.size(-1)
         vocab_size = self.vocab_size
-        dec_len = [x-1 for x in caption_lengths]
-        max_dec_len = max(dec_len)
+        k = 10 #beam_size
+        encoded_captions = torch.LongTensor([[1]]*k).to(device)
 
         encoder_out = encoder_out.view(batch_size, -1, encoder_dim)
         num_pixels = encoder_out.size(1)
+        encoder_out = encoder_out.expand(k, num_pixels, encoder_dim)
+
+        #Testing
 
         # load bert or regular embeddings
-        if not self.use_bert:
-            embeddings = self.embedding(encoded_captions)
-        elif self.use_bert:
-            embeddings = []
-            for cap_idx in  encoded_captions:
+        def dec_embedding(encoded_captions, num_pixels):
+            max_cap_len = 20
+            if not self.use_bert:
+                embeddings = self.embedding(encoded_captions)
+            elif self.use_bert:
+                embeddings = []
+                for cap_idx in  encoded_captions:
+                    cap_idx = cap_idx.tolist()
                 
-                # padd caption to correct size
-                while len(cap_idx) < max_dec_len:
-                    cap_idx.append(PAD)
+                    # padd caption to correct size
+                    while len(cap_idx) < max_cap_len:
+                        cap_idx.append(PAD)
                     
-                cap = ' '.join([vocab.idx2word[word_idx.item()] for word_idx in cap_idx])
-                cap = u'[CLS] '+cap
+                    cap = ' '.join([vocab.idx2word[word_idx] for word_idx in cap_idx])
+                    cap = u'[CLS] '+cap
                 
-                tokenized_cap = tokenizer.tokenize(cap)                
-                indexed_tokens = tokenizer.convert_tokens_to_ids(tokenized_cap)
-                tokens_tensor = torch.tensor([indexed_tokens]).to(device)
+                    tokenized_cap = tokenizer.tokenize(cap)                
+                    indexed_tokens = tokenizer.convert_tokens_to_ids(tokenized_cap)
+                    tokens_tensor = torch.tensor([indexed_tokens]).to(device)
 
-                with torch.no_grad():
-                    encoded_layers, _ = BertModel(tokens_tensor)
+                    with torch.no_grad():
+                        encoded_layers, _ = BertModel(tokens_tensor)
 
-                bert_embedding = encoded_layers[11].squeeze(0)
+                    bert_embedding = encoded_layers[11].squeeze(0)
                 
-                split_cap = cap.split()
-                tokens_embedding = []
-                j = 0
+                    split_cap = cap.split()
+                    tokens_embedding = []
+                    j = 0
 
-                for full_token in split_cap:
-                    curr_token = ''
-                    x = 0
-                    for i,_ in enumerate(tokenized_cap[1:]): # disregard CLS
-                        token = tokenized_cap[i+j]
-                        piece_embedding = bert_embedding[i+j]
+                    for full_token in split_cap:
+                        curr_token = ''
+                        x = 0
+                        for i,_ in enumerate(tokenized_cap[1:]): # disregard CLS
+                            token = tokenized_cap[i+j]
+                            piece_embedding = bert_embedding[i+j]
                         
-                        # full token
-                        if token == full_token and curr_token == '' :
-                            tokens_embedding.append(piece_embedding)
-                            j += 1
-                            break
-                        else: # partial token
-                            x += 1
-                            
-                            if curr_token == '':
+                            # full token
+                            if token == full_token and curr_token == '' :
                                 tokens_embedding.append(piece_embedding)
-                                curr_token += token.replace('#', '')
-                            else:
-                                tokens_embedding[-1] = torch.add(tokens_embedding[-1], piece_embedding)
-                                curr_token += token.replace('#', '')
+                                j += 1
+                                break
+                            else: # partial token
+                                x += 1
+                            
+                                if curr_token == '':
+                                    tokens_embedding.append(piece_embedding)
+                                    curr_token += token.replace('#', '')
+                                else:
+                                    tokens_embedding[-1] = torch.add(tokens_embedding[-1], piece_embedding)
+                                    curr_token += token.replace('#', '')
                                 
-                                if curr_token == full_token: # end of partial
-                                    j += x
-                                    break                            
+                                    if curr_token == full_token: # end of partial
+                                        j += x
+                                        break                            
 
-                cap_embedding = torch.stack(tokens_embedding)
-                embeddings.append(cap_embedding)
+                    cap_embedding = torch.stack(tokens_embedding)
+                    embeddings.append(cap_embedding)
   
-            embeddings = torch.stack(embeddings)
+                embeddings = torch.stack(embeddings)
+            return embeddings
 
         # init hidden state
         avg_enc_out = encoder_out.mean(dim=1)
         h = self.h_lin(avg_enc_out)
         c = self.c_lin(avg_enc_out)
 
-        predictions = torch.zeros(batch_size, max_dec_len, vocab_size).to(device)
-        alphas = torch.zeros(batch_size, max_dec_len, num_pixels).to(device)
 
-        for t in range(max(dec_len)):
-            batch_size_t = sum([l > t for l in dec_len ])
-            
+        # Tensor to store top k sequences' scores
+        k_prev_words = encoded_captions
+        seqs = k_prev_words
+        top_k_scores = torch.zeros(k, 1).to(device)
+
+        seqs_alpha = torch.ones(k, 1, encoder_dim, encoder_dim).to(device)
+
+        complete_seqs = list()
+        complete_seqs_scores = list()
+
+        #for t in range(max(dec_len)):
+        step = 1
+        while True:
+            embeddings = dec_embedding(k_prev_words, self.encoder_dim).squeeze(1)
             # soft-attention
-            enc_att = self.enc_att(encoder_out[:batch_size_t])
-            dec_att = self.dec_att(h[:batch_size_t])
+            enc_att = self.enc_att(encoder_out)
+            dec_att = self.dec_att(h)
             att = self.att(self.relu(enc_att + dec_att.unsqueeze(1))).squeeze(2)
             alpha = self.softmax(att)
-            attention_weighted_encoding = (encoder_out[:batch_size_t] * alpha.unsqueeze(2)).sum(dim=1)
+            attention_weighted_encoding = (encoder_out * alpha.unsqueeze(2)).sum(dim=1)
         
-            gate = self.sigmoid(self.f_beta(h[:batch_size_t]))
+            gate = self.sigmoid(self.f_beta(h))
             attention_weighted_encoding = gate * attention_weighted_encoding
+
+            cat_val = torch.cat([embeddings.double(), attention_weighted_encoding.double()], dim=1)
             
-            batch_embeds = embeddings[:batch_size_t, t, :]            
-            cat_val = torch.cat([batch_embeds.double(), attention_weighted_encoding.double()], dim=1)
-            
-            h, c = self.decode_step(cat_val.float(),(h[:batch_size_t].float(), c[:batch_size_t].float()))
-            preds = self.fc(self.dropout(h))
-            predictions[:batch_size_t, t, :] = preds
-            alphas[:batch_size_t, t, :] = alpha
-            
+            h, c = self.decode_step(cat_val.float(),(h.float(), c.float()))
+            # preds = self.fc(self.dropout(h))
+            preds = self.fc(h)
+            # Testing
+            preds = F.log_softmax(preds, dim=1)
+            preds = top_k_scores.expand_as(preds) + preds
+
+            if step == 1:
+                top_k_scores, top_k_words = preds[0].topk(k, 0, True, True)
+            else:
+                top_k_scores, top_k_words = preds.view(-1).topk(k, 0, True, True)
+
+            prev_word_inds = (top_k_words / len(vocab)).long()
+            next_word_inds = (top_k_words % len(vocab)).long()
+
+            seqs = torch.cat([seqs[prev_word_inds], next_word_inds.unsqueeze(1)], dim=1)
+
+            incomplete_inds = [ind for ind, next_word in enumerate(next_word_inds) if next_word != END]
+            complete_inds = list(set(range(len(next_word_inds))) - set(incomplete_inds))
+
+            if len(complete_inds) > 0:
+                complete_seqs.extend(seqs[complete_inds].tolist())
+                complete_seqs_scores.extend(top_k_scores[complete_inds])
+            k -= len(complete_inds)
+
+            if k == 0:
+                break
+            seqs = seqs[incomplete_inds]
+            h = h[prev_word_inds[incomplete_inds]]
+            c = c[prev_word_inds[incomplete_inds]]
+            encoder_out = encoder_out[prev_word_inds[incomplete_inds]]
+            top_k_scores = top_k_scores[incomplete_inds].unsqueeze(1)
+            k_prev_words = next_word_inds[incomplete_inds].unsqueeze(1)
+
+            # Break if things have been going on too long
+            if step > 50:
+                break
+            step += 1
+
+            # predictions[:batch_size_t, t, :] = preds
+            # alphas[:batch_size_t, t, :] = alpha
+
+        i = complete_seqs_scores.index(max(complete_seqs_scores))
+        seq = complete_seqs[i]
+
         # preds, sorted capts, dec lens, attention wieghts
-        return predictions, encoded_captions, dec_len, alphas
+        return seq
 
 # vocab indices
 PAD = 0
@@ -516,25 +571,25 @@ def validate(model_name, encoder, decoder):
         imgs = encoder(imgs.to(device))
         caps = caps.to(device)
 
+        # Just to determine max caption length
+        max_len = max(caplens)
+        # word2idx('<start>') = 1
+        k_prev_words = torch.ones(max_len, max_len).long()
+        k_prev_words.to(device)
 
         #Testing:
-        scores, caps_sorted, decode_lengths, alphas = decoder(imgs, init_cap, init_caplens)
-        targets = caps_sorted[:, 1:]
+        pred = decoder(imgs)
 
-        # Hypotheses
-        _, preds = torch.max(scores, dim=2)
-        preds = preds.tolist()
-        temp_preds = list()
-        for jp, img_id in zip(enumerate(preds), img_ids):
-            j, p = jp
-            pred = p[:decode_lengths[j]]
-            pred = [w for w in pred if w not in [PAD, START, END]]
-
-            caption_list_idxs = val_loader.dataset.coco.getAnnIds(imgIds=img_id)
-            caption_list = [val_loader.dataset.coco.anns[ann]['caption'] for ann in caption_list_idxs]
-            data[img_id] = dict()
-            data[img_id]['reference'] = caption_list
-            data[img_id]['hypothesis'] = ' '.join([vocab.idx2word[idx] for idx in pred])
+        #Batch size is 1 so:
+        img_id = img_ids[0]
+        caption_list_idxs = val_loader.dataset.coco.getAnnIds(imgIds=img_id)
+        caption_list = [val_loader.dataset.coco.anns[ann]['caption'] for ann in caption_list_idxs]
+        pred = [w for w in pred if w not in [PAD, START, END]]
+        data[img_id] = dict()
+        data[img_id]['reference'] = caption_list
+        data[img_id]['hypothesis'] = ' '.join([vocab.idx2word[idx] for idx in pred])
+        # if i == 2:
+        #     break
 
 
     with open(f'val_output/{model_name}.json', 'w') as outfile:
@@ -552,8 +607,8 @@ if train_model:
 if valid_model:
     print('Validating Baseline')
     validate('Baseline', baseline_encoder, baseline_decoder)
-    print('Validating BERT')
-    validate('BERT', bert_encoder, bert_decoder)
+    # print('Validating BERT')
+    # validate('BERT_test', bert_encoder, bert_decoder)
 
 if metric:
     with open('val_output/BERT.json') as json_file:

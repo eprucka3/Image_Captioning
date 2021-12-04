@@ -22,45 +22,62 @@ class DataLoader(data.Dataset):
 
         self.root = root
         self.coco = COCO(json)
-        self.ids = list(self.coco.anns.keys())
+        # self.ids = list(self.coco.anns.keys())
+        self.ids = self.coco.getImgIds()
         self.vocab = vocab
         self.transform = transform
 
     def __getitem__(self, index):
         coco = self.coco
         vocab = self.vocab
-        ann_id = self.ids[index]
-        caption = coco.anns[ann_id]['caption']
-        img_id = coco.anns[ann_id]['image_id']
+        # ann_id = self.ids[index]
+        img_id = self.ids[index]
+        # img_id = coco.anns[ann_id]['image_id']
+        ann_ids = coco.getAnnIds(img_id)
         path = coco.loadImgs(img_id)[0]['file_name']
 
         image = Image.open(os.path.join(self.root, path)).convert('RGB')
         if self.transform is not None:
             image = self.transform(image)
 
-        tokens = nltk.tokenize.word_tokenize(str(caption).lower())
-        caption = []
-        caption.append(vocab('<start>'))
-        caption.extend([vocab(token) for token in tokens])
-        caption.append(vocab('<end>'))
-        target = torch.Tensor(caption)
-        return image, target
+        caption_list = []
+        for ann_id in ann_ids:
+            caption = coco.anns[ann_id]['caption']
+            tokens = nltk.tokenize.word_tokenize(str(caption).lower())
+            caption = []
+            caption.append(vocab('<start>'))
+            caption.extend([vocab(token) for token in tokens])
+            caption.append(vocab('<end>'))
+            target = torch.Tensor(caption)
+            caption_list.append(target)
+        return image, caption_list, img_id
 
     def __len__(self):
         return len(self.ids)
 
 def collate_fn(data):
     data.sort(key=lambda  x: len(x[1]), reverse=True)
-    images, captions = zip(*data)
+    images, captions, img_ids = zip(*data)
 
     images = torch.stack(images, 0)
 
-    lengths = [len(cap) for cap in captions]
+    # lengths = []
+    # for caption in captions:
+    #     lengths.append(max([len(cap) for cap in caption]))
+    # all_targets = []
+    # for caption, length in zip(captions, lengths):
+    #     targets = torch.zeros(len(caption), length).long()
+    #     for i, cap in enumerate(caption):
+    #         end = len(cap)
+    #         targets[i, :end] = cap[:end]
+    #     all_targets.append(targets)
+
+    lengths = [len(cap[0]) for cap in captions]
     targets = torch.zeros(len(captions), max(lengths)).long()
     for i, cap in enumerate(captions):
         end = lengths[i]
-        targets[i, :end] = cap[:end]
-    return images, targets, lengths
+        targets[i, :end] = cap[0][:end]
+    return images, targets, lengths, img_ids
 
 def get_loader(method, vocab, batch_size):
 

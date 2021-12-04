@@ -46,7 +46,7 @@ import json
 # hyperparams
 grad_clip = 5.
 num_epochs = 4
-batch_size = 16 #32
+batch_size = 32
 decoder_lr = 0.0004
 
 # if both are false them model = baseline
@@ -112,7 +112,6 @@ class Encoder(nn.Module):
 class Decoder(nn.Module):
 
     def __init__(self, vocab_size, use_glove, use_bert):
-    # decoder = Decoder(vocab_size=len(vocab),use_glove=glove_model, use_bert=bert_model).to(device)
         super(Decoder, self).__init__()
         self.encoder_dim = 2048
         self.attention_dim = 512
@@ -190,7 +189,6 @@ class Decoder(nn.Module):
                 tokens_tensor = torch.tensor([indexed_tokens]).to(device)
 
                 with torch.no_grad():
-    # decoder = Decoder(vocab_size=len(vocab),use_glove=glove_model, use_bert=bert_model).to(device)
                     encoded_layers, _ = BertModel(tokens_tensor)
 
                 bert_embedding = encoded_layers[11].squeeze(0)
@@ -215,7 +213,6 @@ class Decoder(nn.Module):
                             x += 1
                             
                             if curr_token == '':
-    # decoder = Decoder(vocab_size=len(vocab),use_glove=glove_model, use_bert=bert_model).to(device)
                                 tokens_embedding.append(piece_embedding)
                                 curr_token += token.replace('#', '')
                             else:
@@ -502,6 +499,15 @@ def validate(model_name, encoder, decoder):
     num_batches = len(val_loader)
     # Batches
     data = {}
+    init_cap = None
+    init_caplens = None
+    #Definitely not the most efficient way to do it but take 32 random captions to initialize with
+    for i, (imgs, caps, caplens, img_ids) in enumerate(val_loader):
+        init_cap = caps
+        init_caplens = caplens
+        break
+
+
     for i, (imgs, caps, caplens, img_ids) in enumerate(tqdm(val_loader)):
         imgs_jpg = imgs.numpy() 
         imgs_jpg = np.swapaxes(np.swapaxes(imgs_jpg, 1, 3), 1, 2)
@@ -510,32 +516,10 @@ def validate(model_name, encoder, decoder):
         imgs = encoder(imgs.to(device))
         caps = caps.to(device)
 
-        # Just to determine max caption length
-        max_len = max(caplens)
-        # word2idx('<start>') = 1
-        k_prev_words = torch.ones(max_len, max_len).long()
-        k_prev_words.to(device)
 
         #Testing:
-        scores, caps_sorted, decode_lengths, alphas = decoder(imgs, k_prev_words, caplens)
+        scores, caps_sorted, decode_lengths, alphas = decoder(imgs, init_cap, init_caplens)
         targets = caps_sorted[:, 1:]
-
-        # Remove timesteps that we didn't decode at, or are pads
-        # scores_packed = pack_padded_sequence(scores, decode_lengths, batch_first=True)[0]
-        # targets_packed = pack_padded_sequence(targets, decode_lengths, batch_first=True)[0]
-
-        # Calculate loss
-        # loss = criterion(scores_packed, targets_packed)
-        # loss += ((1. - alphas.sum(dim=1)) ** 2).mean()
-        # losses.update(loss.item(), sum(decode_lengths))
-
-         # References
-        # for j in range(targets.shape[0]):
-        #     img_caps = targets[j].tolist() # validation dataset only has 1 unique caption per img
-        #     clean_cap = [w for w in img_caps if w not in [PAD, START, END]]  # remove pad, start, and end
-        #     img_captions = list(map(lambda c: clean_cap,img_caps))
-        #     test_references.append(clean_cap)
-        #     references.append(img_captions)
 
         # Hypotheses
         _, preds = torch.max(scores, dim=2)
@@ -552,8 +536,6 @@ def validate(model_name, encoder, decoder):
             data[img_id]['reference'] = caption_list
             data[img_id]['hypothesis'] = ' '.join([vocab.idx2word[idx] for idx in pred])
 
-        if i == 2:
-            break
 
     with open(f'val_output/{model_name}.json', 'w') as outfile:
         json.dump(data, outfile)
@@ -569,9 +551,9 @@ if train_model:
 
 if valid_model:
     print('Validating Baseline')
-    validate('Baseline_blank', baseline_encoder, baseline_decoder)
+    validate('Baseline', baseline_encoder, baseline_decoder)
     print('Validating BERT')
-    validate('BERT_blank', bert_encoder, bert_decoder)
+    validate('BERT', bert_encoder, bert_decoder)
 
 if metric:
     with open('val_output/BERT.json') as json_file:

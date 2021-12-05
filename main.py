@@ -11,7 +11,6 @@ Edit the parameters sections of this file to specify which models to load/run
 ''' 
 
 # coding: utf-8
-
 import pickle
 import torch.nn as nn
 import torch
@@ -85,6 +84,7 @@ tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
 # Load pre-trained model (weights)
 BertModel = BertModel.from_pretrained('bert-base-uncased').to(device)
 BertModel.eval()
+
 
 # Load GloVe
 glove_vectors = pickle.load(open('glove.6B/glove_words.pkl', 'rb'))
@@ -175,11 +175,12 @@ class Decoder(nn.Module):
 
         # load bert or regular embeddings
         def dec_embedding(encoded_captions, num_pixels):
-            max_cap_len = 20
+            max_cap_len = 1 
             if not self.use_bert:
                 embeddings = self.embedding(encoded_captions)
             elif self.use_bert:
                 embeddings = []
+                sentences = []
                 for cap_idx in  encoded_captions:
                     cap_idx = cap_idx.tolist()
                 
@@ -188,6 +189,8 @@ class Decoder(nn.Module):
                         cap_idx.append(PAD)
                     
                     cap = ' '.join([vocab.idx2word[word_idx] for word_idx in cap_idx])
+                    sentences.append(cap)
+                    #embeddings = torch.tensor(bert_Transformer.encode(sentences))
                     cap = u'[CLS] '+cap
                 
                     tokenized_cap = tokenizer.tokenize(cap)                
@@ -195,8 +198,7 @@ class Decoder(nn.Module):
                     tokens_tensor = torch.tensor([indexed_tokens]).to(device)
 
                     with torch.no_grad():
-                        encoded_layers, _ = BertModel(tokens_tensor)
-
+                        encoded_layers, cls_head = BertModel(tokens_tensor)
                     bert_embedding = encoded_layers[11].squeeze(0)
                 
                     split_cap = cap.split()
@@ -227,12 +229,13 @@ class Decoder(nn.Module):
                                 
                                     if curr_token == full_token: # end of partial
                                         j += x
-                                        break                            
+                                        break
 
                     cap_embedding = torch.stack(tokens_embedding)
                     embeddings.append(cap_embedding)
-  
+ 
                 embeddings = torch.stack(embeddings)
+                embeddings = embeddings[:,1,:]
             return embeddings
 
         # init hidden state
@@ -588,8 +591,8 @@ def validate(model_name, encoder, decoder):
         data[img_id] = dict()
         data[img_id]['reference'] = caption_list
         data[img_id]['hypothesis'] = ' '.join([vocab.idx2word[idx] for idx in pred])
-        # if i == 2:
-        #     break
+        if i == 2:
+            break
 
 
     with open(f'val_output/{model_name}.json', 'w') as outfile:
@@ -605,10 +608,12 @@ if train_model:
     train()
 
 if valid_model:
-    print('Validating Baseline')
-    validate('Baseline', baseline_encoder, baseline_decoder)
-    # print('Validating BERT')
-    # validate('BERT_test', bert_encoder, bert_decoder)
+    # print('Validating Baseline')
+    # validate('Baseline', baseline_encoder, baseline_decoder)
+    print('Validating GloVe')
+    validate('GloVe', glove_encoder, glove_decoder)
+    #print('Validating BERT')
+    #validate('BERT_test', bert_encoder, bert_decoder)
 
 if metric:
     with open('val_output/BERT.json') as json_file:
